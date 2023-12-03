@@ -1,11 +1,11 @@
 import configparser
-import json
-import urllib.parse, urllib.request
+import urllib.parse
+import requests
 import time, datetime
 import xml.dom.minidom
 import sys, os, argparse
 
-class Zap2ItGuideScrape():
+class Zap2It():
 
     def __init__(self,configLocation="./zap2itconfig.ini",outputFile="xmlguide.xmltv"):
         self.confLocation = configLocation
@@ -14,28 +14,33 @@ class Zap2ItGuideScrape():
         self.config = configparser.ConfigParser()
         self.config.read(self.confLocation)
         self.lang = self.config.get("prefs","lang")
-
         self.zapToken = ""
     def BuildAuthRequest(self):
         url = "https://tvlistings.zap2it.com/api/user/login"
         parameters = {
             "emailid": self.config.get("creds","username"),
             "password": self.config.get("creds","password"),
-            "isfacebookuser": "false",
-            "usertype": 0,
-            "objectid": ""
+            # "isfacebookuser": "false",
+            # "usertype": 0,
+            # "objectid": ""
         }
-        data = urllib.parse.urlencode((parameters))
-        data = data.encode('ascii')
-        req = urllib.request.Request(url, data)
-        return req
+        p_data = urllib.parse.urlencode(parameters).encode()
+        return (url, parameters, p_data)
+    
     def Authenticate(self):
         #Get token from login form
         authRequest = self.BuildAuthRequest()
-        authResponse = urllib.request.urlopen(authRequest).read()
-        authFormVars = json.loads(authResponse)
-        self.zapTocken = authFormVars["token"]
+        resp = requests.post(authRequest[0],data=authRequest[1])
+        if resp.status_code != 200:
+            print(f'Failed Authentication: {resp.status_code}')
+            print(authRequest[0],authRequest[1])
+            exit(-1)
+
+        print('Auth response finished')
+        authFormVars = resp.json()
+        self.zapToken = authFormVars["token"]
         self.headendid= authFormVars["properties"]["2004"]
+
     def BuildIDRequest(self):
         url = "https://tvlistings.zap2it.com/gapzap_webapi/api/Providers/getPostalCodeProviders/"
         url += self.config.get("prefs","country") + "/"
@@ -44,12 +49,24 @@ class Zap2ItGuideScrape():
             url += self.config.get("prefs","lang")
         else:
             url += "en-us"
-        req = urllib.request.Request(url)
-        return req
+
+        resp = requests.post(url)
+        if resp.status_code != 200:
+            print(f'Failed Build Id Request: {resp.status_code}')
+            print(url)
+            exit(-1)
+        return url
+            
     def FindID(self):
         idRequest = self.BuildIDRequest()
-        idResponse = urllib.request.urlopen(idRequest).read()
-        idVars = json.loads(idResponse)
+        resp = requests.get(idRequest)
+        if resp.status_code != 200:
+            print(f'Failed to find id: {resp.status_code}')
+            print(idRequest)
+            exit(-1)
+
+        idVars = resp.json()
+        # print(idVars)
         print(f'{"type":<15}|{"name":<40}|{"location":<15}|',end='')
         print(f'{"headendID":<15}|{"lineupId":<25}|{"device":<15}')
         for provider in idVars["Providers"]:
@@ -93,20 +110,27 @@ class Zap2ItGuideScrape():
         }
         data = urllib.parse.urlencode(parameters)
         url = "https://tvlistings.zap2it.com/api/grid?" + data
-        req = urllib.request.Request(url)
-        return req
+        return url
+    
     def GetData(self,time):
         request = self.BuildDataRequest(time)
         print("Load Guide for time: ",str(time))
-        response = urllib.request.urlopen(request).read()
-        return json.loads(response)
+        resp = requests.get(request)
+        if resp.status_code != 200:
+            print(f'Failed to get data: {resp.status_code}')
+            print(request)
+            exit(-1)
+        return resp.json()
+    
     def AddChannelsToGuide(self, json):
         for channel in json["channels"]:
             self.rootEl.appendChild(self.BuildChannelXML(channel))
+
     def AddEventsToGuide(self,json):
         for channel in json["channels"]:
             for event in channel["events"]:
                 self.rootEl.appendChild(self.BuildEventXmL(event,channel["channelId"]))
+
     def BuildEventXmL(self,event,channelId):
         #preConfig
         season = "0"
@@ -201,10 +225,12 @@ class Zap2ItGuideScrape():
             valueEl = self.CreateElementWithData("value",event["rating"])
             ratingEl.appendChild(valueEl)
         return programEl
+    
     def BuildXMLDate(self,inTime):
         output = inTime.replace('-','').replace('T','').replace(':','')
         output = output.replace('Z',' +0000')
         return output
+    
     def BuildChannelXML(self,channel):
         channelEl = self.guideXML.createElement('channel')
         channelEl.setAttribute('id',channel["channelId"])
@@ -226,6 +252,7 @@ class Zap2ItGuideScrape():
         elText = self.guideXML.createTextNode(data)
         el.appendChild(elText)
         return el
+    
     def GetGuideTimes(self):
         currentTimestamp = time.time()
         currentTimestamp -= 60 * 60 * 24
@@ -233,25 +260,32 @@ class Zap2ItGuideScrape():
         currentTimestamp = currentTimestamp - halfHourOffset
         endTimeStamp = currentTimestamp + (60 * 60 * 336)
         return (currentTimestamp,endTimeStamp)
+    
     def BuildRootEl(self):
         self.rootEl = self.guideXML.createElement('tv')
         self.rootEl.setAttribute("source-info-url","http://tvlistings.zap2it.com/")
         self.rootEl.setAttribute("source-info-name","zap2it")
         self.rootEl.setAttribute("generator-info-name","zap2it-GuideScraping)")
-        self.rootEl.setAttribute("generator-info-url","daniel@widrick.net")
+        self.rootEl.setAttribute("generator-info-url","devdoesit17@gmail.com")
+    
     def BuildGuide(self):
         self.Authenticate()
         self.guideXML = xml.dom.minidom.Document()
+        print('guideXML finished')
         impl = xml.dom.minidom.getDOMImplementation()
+        print('impl finished')
         doctype = impl.createDocumentType("tv","","xmltv.dtd")
+        print('doctype finished')
         self.guideXML.appendChild(doctype)
         self.BuildRootEl()
 
         addChannels = True;
         times = self.GetGuideTimes()
+        # print(f'guide times {times}')
         loopTime = times[0]
         while(loopTime < times[1]):
             json = self.GetData(loopTime)
+            # print(f'json {json}')
             if addChannels:
                 self.AddChannelsToGuide(json)     
                 addChannels = False           
@@ -259,17 +293,22 @@ class Zap2ItGuideScrape():
             loopTime += (60 * 60 * 3)
         self.guideXML.appendChild(self.rootEl)
         self.WriteGuide()
+
+        print('write guide finished')
         self.CopyHistorical()
         self.CleanHistorical()
+
     def WriteGuide(self):
         with open(self.outputFile,"wb") as file:
             file.write(self.guideXML.toprettyxml().encode("utf8"))
+            
     def CopyHistorical(self):
         dateTimeObj = datetime.datetime.now()
         timestampStr = "." + dateTimeObj.strftime("%Y%m%d%H%M%S") + '.xmltv'
         histGuideFile = timestampStr.join(optGuideFile.rsplit('.xmltv',1))
         with open(histGuideFile,"wb") as file:
             file.write(self.guideXML.toprettyxml().encode("utf8"))
+
     def CleanHistorical(self):
         outputFilePath = os.path.abspath(self.outputFile)
         outputDir = os.path.dirname(outputFilePath)
@@ -287,7 +326,6 @@ optConfigFile = './zap2itconfig.ini'
 optGuideFile = 'xmlguide.xmltv'
 optLanguage = 'en'
 
-
 parser = argparse.ArgumentParser("Parse Zap2it Guide into XMLTV")
 parser.add_argument("-c","--configfile","-i","--ifile", help='Path to config file')
 parser.add_argument("-o","--outputfile","--ofile", help='Path to output file')
@@ -303,7 +341,7 @@ if args.outputfile is not None:
 if args.language is not None:
     optLanguage = args.language
 
-guide = Zap2ItGuideScrape(optConfigFile,optGuideFile)
+guide = Zap2It(optConfigFile,optGuideFile)
 if optLanguage != "en":
     guide.lang = optLanguage
 
@@ -311,6 +349,9 @@ if args.findid is not None and args.findid:
     #locate the IDs
     guide.FindID()
     sys.exit()
+
+dateTimeObj = datetime.datetime.now()
+print(f'Running {dateTimeObj.strftime("%m/%d/%Y-%H:%M:%S")}')
 
 guide.BuildGuide()
 
